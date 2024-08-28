@@ -24,7 +24,7 @@ router = APIRouter()
 
 class ChatBody(ChatParams):
     """ /chat request body """
-    question: str
+    input: str
     collection: str
     chat_history: list = []
     chat_lang: str | None = None
@@ -89,7 +89,7 @@ async def chat_action(
 
             yield conversation_callback.chain_result(
                 callb=token_callback,
-                question=chat_body.question,
+                question=chat_body.input,
                 collection=chat_body.collection,
                 x_chat_session=x_chat_session,
             )
@@ -133,10 +133,10 @@ async def run_chain(
 ):
     """Run chain usign async methods and return result"""
     result = await chain.ainvoke({
-        'question': chat_body.question,
+        'input': chat_body.input,
         'chat_history': retrieve_chat_history(
             history=chat_body.chat_history,
-            question=chat_body.question,
+            question=chat_body.input,
             session=x_chat_session,
             embeddings=embeddings,
         ),
@@ -165,7 +165,7 @@ def chat_result(
         chat_hist = chat_history.add_history(
             session_id=x_chat_session,
             collection=chat_body.collection,
-            question=chat_body.question,
+            question=chat_body.input,
             answer=answer,
             metadata=token_usage(callb),
         )
@@ -173,7 +173,7 @@ def chat_result(
 
     return {
         'bot': answer,
-        'docs': None if not chat_body.source_docs else result['source_documents'],
+        # 'docs': None if not chat_body.source_docs else result['source_documents'],
         'chat_history_id': chat_history_id,
         'token_data': None if not chat_body.token_data else token_usage(callb)
     }

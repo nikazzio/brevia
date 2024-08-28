@@ -2,8 +2,11 @@
 from os import path
 from langchain.chains.base import Chain
 from langchain.chains.conversational_retrieval.base import ConversationalRetrievalChain
+from langchain_core.prompts.chat import MessagesPlaceholder
 from langchain.chains.question_answering import load_qa_chain
 from langchain.chains.llm import LLMChain
+from langchain.chains import create_history_aware_retriever, create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_community.vectorstores.pgembedding import CollectionStore
 from langchain_community.vectorstores.pgvector import DistanceStrategy, PGVector
 from langchain_core.callbacks import BaseCallbackHandler
@@ -190,26 +193,28 @@ def conversation_chain(
     prompts = collection.cmetadata.get('prompts')
     qa_llm_conf = collection.cmetadata.get(
         'qa_completion_llm',
+        # pylint: disable=E1101
         settings.qa_completion_llm.copy()
     )
     fup_llm_conf = collection.cmetadata.get(
         'qa_followup_llm',
+        # pylint: disable=E1101
         settings.qa_followup_llm.copy()
     )
 
-    verbose = settings.verbose_mode
+    # verbose = settings.verbose_mode
 
     # LLM to rewrite follow-up question
     fup_llm = load_chatmodel(fup_llm_conf)
 
     logging_handler = AsyncLoggingCallbackHandler()
     # Create chain for follow-up question using chat history (if present)
-    question_generator = LLMChain(
-        llm=fup_llm,
-        prompt=load_condense_prompt(prompts),
-        verbose=verbose,
-        callbacks=[logging_handler],
-    )
+    # question_generator = LLMChain(
+    #    llm=fup_llm,
+    #    prompt=load_condense_prompt(prompts),
+    #    verbose=verbose,
+    #    callbacks=[logging_handler],
+    # )
 
     # Model to use in final prompt
     answer_callbacks.append(logging_handler)
@@ -218,23 +223,73 @@ def conversation_chain(
     chatllm = load_chatmodel(qa_llm_conf)
 
     # this chain use "stuff" to elaborate context
-    doc_chain = load_qa_chain(
-        llm=chatllm,
-        prompt=load_qa_prompt(prompts),
-        chain_type="stuff",
-        verbose=verbose,
-        callbacks=[logging_handler],
-    )
+    # doc_chain = load_qa_chain(
+    #    llm=chatllm,
+    #    prompt=load_qa_prompt(prompts),
+    #    chain_type="stuff",
+    #    verbose=verbose,
+    #    callbacks=[logging_handler],
+    # )
 
     # main chain, do all the jobs
     search_kwargs = {'k': chat_params.docs_num, 'filter': chat_params.filter}
 
-    conversation_callbacks.append(logging_handler)
-    return ConversationalRetrievalChain(
-        retriever=docsearch.as_retriever(search_kwargs=search_kwargs),
-        combine_docs_chain=doc_chain,
-        return_source_documents=chat_params.source_docs,
-        question_generator=question_generator,
-        callbacks=conversation_callbacks,
-        verbose=verbose,
+    contextualize_q_system_prompt = (
+        "Given a chat history and the latest user question "
+        "which might reference context in the chat history, "
+        "formulate a standalone question which can be understood "
+        "without the chat history. Do NOT answer the question, "
+        "just reformulate it if needed and otherwise return it as is."
     )
+
+    contextualize_q_prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", contextualize_q_system_prompt),
+            MessagesPlaceholder("chat_history"),
+            ("human", "{input}"),
+        ]
+    )
+
+    history_aware_retriever = create_history_aware_retriever(
+        fup_llm,
+        docsearch.as_retriever(search_kwargs=search_kwargs),
+        contextualize_q_prompt
+    )
+    conversation_callbacks.append(logging_handler)
+
+    system_prompt = (
+        "You are an assistant for question-answering tasks. "
+        "Use the following pieces of retrieved context to answer "
+        "the question. If you don't know the answer, say that you "
+        "don't know. Use three sentences maximum and keep the "
+        "answer concise."
+        "\n\n"
+        "{context}"
+    )
+
+    qa_prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", system_prompt),
+            ("placeholder", "{chat_history}"),
+            ("human", "{input}"),
+        ]
+    )
+
+    qa_chain = create_stuff_documents_chain(
+        chatllm,
+        qa_prompt
+    )
+
+    return create_retrieval_chain(
+        history_aware_retriever,
+        qa_chain,
+    )
+
+    # return ConversationalRetrievalChain(
+    #    retriever=docsearch.as_retriever(search_kwargs=search_kwargs),
+    #    combine_docs_chain=doc_chain,
+    #    return_source_documents=chat_params.source_docs,
+    #    question_generator=question_generator,
+    #    callbacks=conversation_callbacks,
+    #    verbose=verbose,
+    # )
